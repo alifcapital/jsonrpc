@@ -45,6 +45,15 @@ type RPCClient interface {
 	// for more information, see the examples or the unit tests
 	Call(method string, params ...interface{}) (*RPCResponse, error)
 
+	// CallWithHeaders is Call but with custom http headers
+	CallNotStrict(method string, params ...interface{}) (*RPCResponse, error)
+
+	// CallCustom unmarshal response to custom response struct
+	CallCustom(method string, model interface{}, params ...interface{}) error
+
+	// CallCustomWithHeaders is like CallCustom but you can add custom headers for the call
+	CallCustomWithHeaders(method string, model interface{}, headers map[string]string, params ...interface{}) error
+
 	// CallRaw is like Call() but without magic in the requests.Params field.
 	// The RPCRequest object is sent exactly as you provide it.
 	// See docs: NewRequest, RPCRequest, Params()
@@ -326,6 +335,39 @@ func (client *rpcClient) Call(method string, params ...interface{}) (*RPCRespons
 	return client.doCall(request)
 }
 
+func (client *rpcClient) CallNotStrict(method string, params ...interface{}) (*RPCResponse, error) {
+
+	request := &RPCRequest{
+		Method:  method,
+		Params:  Params(params...),
+		JSONRPC: jsonrpcVersion,
+	}
+
+	return client.doCallNotStrict(request)
+}
+
+func (client *rpcClient) CallCustom(method string, model interface{}, params ...interface{}) error {
+
+	request := &RPCRequest{
+		Method:  method,
+		Params:  Params(params...),
+		JSONRPC: jsonrpcVersion,
+	}
+
+	return client.doCallCustom(request, model)
+}
+
+func (client *rpcClient) CallCustomWithHeaders(method string, model interface{}, headers map[string]string, params ...interface{}) error {
+
+	request := &RPCRequest{
+		Method:  method,
+		Params:  Params(params...),
+		JSONRPC: jsonrpcVersion,
+	}
+
+	return client.doCallCustomWithHeaders(request, model, headers)
+}
+
 func (client *rpcClient) CallRaw(request *RPCRequest) (*RPCResponse, error) {
 
 	return client.doCall(request)
@@ -365,6 +407,32 @@ func (client *rpcClient) CallBatchRaw(requests RPCRequests) (RPCResponses, error
 	return client.doBatchCall(requests)
 }
 
+func (client *rpcClient) newRequestWithHeaders(req interface{}, headers map[string]string) (*http.Request, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	request, err := http.NewRequest("POST", client.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+
+	// set default headers first, so that even content type and accept can be overwritten
+	for k, v := range client.customHeaders {
+		request.Header.Set(k, v)
+	}
+
+	for k, v := range headers {
+		request.Header.Set(k, v)
+	}
+
+	return request, nil
+}
+
 func (client *rpcClient) newRequest(req interface{}) (*http.Request, error) {
 
 	body, err := json.Marshal(req)
@@ -388,6 +456,141 @@ func (client *rpcClient) newRequest(req interface{}) (*http.Request, error) {
 	return request, nil
 }
 
+func (client *rpcClient) doCallCustom(RPCRequest *RPCRequest, model interface{}) error {
+
+	httpRequest, err := client.newRequest(RPCRequest)
+	if err != nil {
+		return fmt.Errorf("rpc call %v() on %v: %v", RPCRequest.Method, client.endpoint, err.Error())
+	}
+	httpResponse, err := client.httpClient.Do(httpRequest)
+	if err != nil {
+		return fmt.Errorf("rpc call %v() on %v: %v", RPCRequest.Method, httpRequest.URL.String(), err.Error())
+	}
+	defer httpResponse.Body.Close()
+
+	decoder := json.NewDecoder(httpResponse.Body)
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	err = decoder.Decode(&model)
+
+	// parsing error
+	if err != nil {
+		// if we have some http error, return it
+		if httpResponse.StatusCode >= 400 {
+			return &HTTPError{
+				Code: httpResponse.StatusCode,
+				err:  fmt.Errorf("rpc call %v() on %v status code: %v. could not decode body to rpc response: %v", RPCRequest.Method, httpRequest.URL.String(), httpResponse.StatusCode, err.Error()),
+			}
+		}
+		return fmt.Errorf("rpc call %v() on %v status code: %v. could not decode body to rpc response: %v", RPCRequest.Method, httpRequest.URL.String(), httpResponse.StatusCode, err.Error())
+	}
+
+	// response body empty
+	if model == nil {
+		// if we have some http error, return it
+		if httpResponse.StatusCode >= 400 {
+			return &HTTPError{
+				Code: httpResponse.StatusCode,
+				err:  fmt.Errorf("rpc call %v() on %v status code: %v. rpc response missing", RPCRequest.Method, httpRequest.URL.String(), httpResponse.StatusCode),
+			}
+		}
+		return fmt.Errorf("rpc call %v() on %v status code: %v. rpc response missing", RPCRequest.Method, httpRequest.URL.String(), httpResponse.StatusCode)
+	}
+
+	return nil
+}
+
+func (client *rpcClient) doCallCustomWithHeaders(RPCRequest *RPCRequest, model interface{}, headers map[string]string) error {
+
+	httpRequest, err := client.newRequestWithHeaders(RPCRequest, headers)
+	if err != nil {
+		return fmt.Errorf("rpc call %v() on %v: %v", RPCRequest.Method, client.endpoint, err.Error())
+	}
+	httpResponse, err := client.httpClient.Do(httpRequest)
+	if err != nil {
+		return fmt.Errorf("rpc call %v() on %v: %v", RPCRequest.Method, httpRequest.URL.String(), err.Error())
+	}
+	defer httpResponse.Body.Close()
+
+	decoder := json.NewDecoder(httpResponse.Body)
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	err = decoder.Decode(&model)
+
+	// parsing error
+	if err != nil {
+		// if we have some http error, return it
+		if httpResponse.StatusCode >= 400 {
+			return &HTTPError{
+				Code: httpResponse.StatusCode,
+				err:  fmt.Errorf("rpc call %v() on %v status code: %v. could not decode body to rpc response: %v", RPCRequest.Method, httpRequest.URL.String(), httpResponse.StatusCode, err.Error()),
+			}
+		}
+		return fmt.Errorf("rpc call %v() on %v status code: %v. could not decode body to rpc response: %v", RPCRequest.Method, httpRequest.URL.String(), httpResponse.StatusCode, err.Error())
+	}
+
+	// response body empty
+	if model == nil {
+		// if we have some http error, return it
+		if httpResponse.StatusCode >= 400 {
+			return &HTTPError{
+				Code: httpResponse.StatusCode,
+				err:  fmt.Errorf("rpc call %v() on %v status code: %v. rpc response missing", RPCRequest.Method, httpRequest.URL.String(), httpResponse.StatusCode),
+			}
+		}
+		return fmt.Errorf("rpc call %v() on %v status code: %v. rpc response missing", RPCRequest.Method, httpRequest.URL.String(), httpResponse.StatusCode)
+	}
+
+	return nil
+}
+
+// without decoder.DisallowUnknownFields()
+func (client *rpcClient) doCallNotStrict(RPCRequest *RPCRequest) (*RPCResponse, error) {
+
+	httpRequest, err := client.newRequest(RPCRequest)
+	if err != nil {
+		return nil, fmt.Errorf("rpc call %v() on %v: %v", RPCRequest.Method, client.endpoint, err.Error())
+	}
+	httpResponse, err := client.httpClient.Do(httpRequest)
+	if err != nil {
+		return nil, fmt.Errorf("rpc call %v() on %v: %v", RPCRequest.Method, httpRequest.URL.String(), err.Error())
+	}
+	defer httpResponse.Body.Close()
+
+	var rpcResponse *RPCResponse
+	decoder := json.NewDecoder(httpResponse.Body)
+
+	decoder.UseNumber()
+	err = decoder.Decode(&rpcResponse)
+
+	// parsing error
+	if err != nil {
+		// if we have some http error, return it
+		if httpResponse.StatusCode >= 400 {
+			return nil, &HTTPError{
+				Code: httpResponse.StatusCode,
+				err:  fmt.Errorf("rpc call %v() on %v status code: %v. could not decode body to rpc response: %v", RPCRequest.Method, httpRequest.URL.String(), httpResponse.StatusCode, err.Error()),
+			}
+		}
+		return nil, fmt.Errorf("rpc call %v() on %v status code: %v. could not decode body to rpc response: %v", RPCRequest.Method, httpRequest.URL.String(), httpResponse.StatusCode, err.Error())
+	}
+
+	// response body empty
+	if rpcResponse == nil {
+		// if we have some http error, return it
+		if httpResponse.StatusCode >= 400 {
+			return nil, &HTTPError{
+				Code: httpResponse.StatusCode,
+				err:  fmt.Errorf("rpc call %v() on %v status code: %v. rpc response missing", RPCRequest.Method, httpRequest.URL.String(), httpResponse.StatusCode),
+			}
+		}
+		return nil, fmt.Errorf("rpc call %v() on %v status code: %v. rpc response missing", RPCRequest.Method, httpRequest.URL.String(), httpResponse.StatusCode)
+	}
+
+	return rpcResponse, nil
+}
+
+// with decoder.DisallowUnknownFields()
 func (client *rpcClient) doCall(RPCRequest *RPCRequest) (*RPCResponse, error) {
 
 	httpRequest, err := client.newRequest(RPCRequest)
