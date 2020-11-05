@@ -513,7 +513,6 @@ func (client *rpcClient) doCallCustomWithHeaders(RPCRequest *RPCRequest, model i
 	defer httpResponse.Body.Close()
 
 	decoder := json.NewDecoder(httpResponse.Body)
-	decoder.DisallowUnknownFields()
 	decoder.UseNumber()
 	err = decoder.Decode(&model)
 
